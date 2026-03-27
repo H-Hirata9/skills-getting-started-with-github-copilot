@@ -8,11 +8,61 @@ for extracurricular activities at Mergington High School.
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, ConfigDict, field_validator
 import os
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
+
+
+# Pydantic Models for request/response validation
+class SignupRequest(BaseModel):
+    """Request model for signup endpoint"""
+    email: str
+
+    @field_validator('email')
+    @classmethod
+    def validate_email(cls, v):
+        """Validate email format (must contain @)"""
+        if '@' not in v or not v.strip():
+            raise ValueError('Invalid email format. Email must contain @')
+        return v
+
+
+class Activity(BaseModel):
+    """Activity model with participants list"""
+    model_config = ConfigDict(from_attributes=True)
+    
+    name: str
+    description: str
+    schedule: str
+    max_participants: int
+    participants: list[str]
+
+
+class ActivityResponse(BaseModel):
+    """Response model for activity details"""
+    name: str
+    description: str
+    schedule: str
+    max_participants: int
+    participants: list[str]
+    available_spots: int
+
+    @classmethod
+    def from_activity(cls, name: str, activity_data: dict):
+        """Create response from activity data"""
+        available_spots = activity_data["max_participants"] - len(activity_data["participants"])
+        return cls(
+            name=name,
+            description=activity_data["description"],
+            schedule=activity_data["schedule"],
+            max_participants=activity_data["max_participants"],
+            participants=activity_data["participants"],
+            available_spots=available_spots
+        )
+
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
@@ -83,14 +133,24 @@ def root():
     return RedirectResponse(url="/static/index.html")
 
 
-@app.get("/activities")
+@app.get("/activities", response_model=list[ActivityResponse])
 def get_activities():
-    return activities
+    """Get all activities with participant information"""
+    return [
+        ActivityResponse.from_activity(name, activity_data)
+        for name, activity_data in activities.items()
+    ]
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
+    # Validate email format
+    try:
+        signup_request = SignupRequest(email=email)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -99,25 +159,40 @@ def signup_for_activity(activity_name: str, email: str):
     activity = activities[activity_name]
 
     # Validate student is not already signed up
-    if email in activity["participants"]:
+    if signup_request.email in activity["participants"]:
         raise HTTPException(status_code=400, detail="Student is already signed up for this activity")
 
+    # Check capacity before adding
+    if len(activity["participants"]) >= activity["max_participants"]:
+        raise HTTPException(status_code=400, detail="Activity is at full capacity")
 
     # Add student
-    activity["participants"].append(email)
-    return {"message": f"Signed up {email} for {activity_name}"}
+    activity["participants"].append(signup_request.email)
+    return {
+        "message": f"Signed up {signup_request.email} for {activity_name}",
+        "activity": activity_name,
+        "email": signup_request.email
+    }
 
 
 @app.delete("/activities/{activity_name}/participants/{email}")
 def remove_participant(activity_name: str, email: str):
     """Remove a student from an activity"""
+    # Validate email format
+    try:
+        email_request = SignupRequest(email=email)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    
+    # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
 
     activity = activities[activity_name]
 
-    if email not in activity["participants"]:
+    # Validate participant exists
+    if email_request.email not in activity["participants"]:
         raise HTTPException(status_code=404, detail="Participant not found")
 
-    activity["participants"].remove(email)
-    return {"message": f"Removed {email} from {activity_name}"}
+    activity["participants"].remove(email_request.email)
+    return {"message": f"Removed {email_request.email} from {activity_name}"}
